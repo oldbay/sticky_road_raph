@@ -1,0 +1,1 @@
+﻿SELECT pgr_createTopology('road_line', 0.0001, 'geom', 'id');
