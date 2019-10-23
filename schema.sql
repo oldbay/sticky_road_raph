@@ -107,17 +107,18 @@ before delete on connector
 
 create or replace function connector_before_ops() returns trigger as $connector_before_ops$
     declare
+        time_ends_array geometry(Point)[][];
         ends_array geometry(Point)[];
         line_point geometry(Point);
         line_fix geometry(LineString);
         line_fix_go boolean;
-        connector_id integer;
+        val_connector_id integer;
     begin
         -- delete road
         if (TG_OP = 'DELETE') then
             delete
             from road_connector
-            where road_id = OLD.id;$connector_before_ops$ language plpgsql
+            where road_id = OLD.id;
 
             delete
             from connector
@@ -134,8 +135,36 @@ create or replace function connector_before_ops() returns trigger as $connector_
             return OLD;
         end if;
         -- clean old connector from update
---        if (TG_OP = 'INSERT') or (TG_OP = 'UPDATE') then
---        end if;
+        if (TG_OP = 'UPDATE') then
+            time_ends_array = array[[ST_StartPoint(OLD.geom),ST_StartPoint(NEW.geom)],[ST_EndPoint(OLD.geom),ST_EndPoint(NEW.geom)]];
+            foreach ends_array slice 1 in array time_ends_array
+            loop
+                val_connector_id = (
+                    select connector.id
+                    from connector
+                    where ST_Within(ends_array[1],connector.geom)
+                    and not ST_Within(ends_array[2],connector.geom)
+                );
+                if val_connector_id > 0 then
+                    delete
+                    from road_connector
+                    where road_connector.road_id = OLD.id
+                    and road_connector.connector_id = val_connector_id;
+
+                    delete
+                    from connector
+                    where id in (
+                        select connector.id
+                        from connector
+                        where connector.id = val_connector_id
+                        and connector.id not in (
+                            select road_connector.connector_id
+                            from road_connector
+                            )
+                        );                    
+                end if;
+            end loop;
+        end if;
         -- fix line
         if (TG_OP = 'INSERT') or (TG_OP = 'UPDATE') then
             ends_array = array[ST_StartPoint(NEW.geom),ST_EndPoint(NEW.geom)];
@@ -143,12 +172,12 @@ create or replace function connector_before_ops() returns trigger as $connector_
             line_fix_go = False;
             foreach line_point in array ends_array
             loop
-                connector_id = (
+                val_connector_id = (
                     select id
                     from connector
                     where ST_Within(line_point,geom)
                 );
-                if connector_id > 0 then
+                if val_connector_id > 0 then
                     line_fix = (
                         select ST_Snap(
                             line_fix,
@@ -156,7 +185,7 @@ create or replace function connector_before_ops() returns trigger as $connector_
                             connector.width*2
                         )
                         from connector
-                        where connector.id = connector_id
+                        where connector.id = val_connector_id
                     );
                     line_fix_go = True;
                 end if;
@@ -183,7 +212,8 @@ create or replace function connector_after_ops() returns trigger as $connector_a
     declare
         ends_array geometry(Point)[];
         line_point geometry(Point);
-        connector_id integer;
+        val_connector_id integer;
+        add_line_id boolean;
     begin
         --backup line ops
         if (TG_OP = 'INSERT') or (TG_OP = 'UPDATE') then
@@ -201,29 +231,35 @@ create or replace function connector_after_ops() returns trigger as $connector_a
                 OLD.geom
             );
         end if;
-        -- del line
---        if (TG_OP = 'DELETE') then
---            ends_array = array[ST_StartPoint(OLD.geom),ST_EndPoint(OLD.geom)];
---            foreach line_point in array new_ends_array
---            loop
---            end loop;
---        end if;
-        -- add line
-        if (TG_OP = 'INSERT') then
+        -- line ops
+        if (TG_OP = 'INSERT') or (TG_OP = 'UPDATE') then
             ends_array = array[ST_StartPoint(NEW.geom),ST_EndPoint(NEW.geom)];
             foreach line_point in array ends_array
             loop
-                connector_id = (
+                val_connector_id = (
                     select id
                     from connector
                     where ST_Within(line_point,geom)
                 );
-                if connector_id > 0 then
-                    insert into road_connector (road_id,connector_id)
-                    values(
-                        NEW.id,
-                        connector_id
-                    );
+                if val_connector_id > 0 then
+                    if (TG_OP = 'UPDATE') then
+                        add_line_id = (
+                            select (road_connector.road_id != NEW.id) 
+                            from road_connector
+                            where road_connector.road_id = NEW.id
+                            and road_connector.connector_id = val_connector_id
+                        );
+                    else
+                        add_line_id = true;
+                    end if;
+
+                    if add_line_id then                    
+                        insert into road_connector (road_id,connector_id)
+                        values(
+                            NEW.id,
+                            val_connector_id
+                        );
+                    end if;
                 else
                     insert into connector (width,geom)
                     values(
@@ -243,9 +279,6 @@ create or replace function connector_after_ops() returns trigger as $connector_a
                 end if;
             end loop;
         end if;
-        -- update line
---        if (TG_OP = 'UPDATE') then
---        end if;
         return NEW; 
     end;
 $connector_after_ops$ language plpgsql
