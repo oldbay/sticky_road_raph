@@ -213,7 +213,6 @@ create or replace function connector_after_ops() returns trigger as $connector_a
         ends_array geometry(Point)[];
         line_point geometry(Point);
         val_connector_id integer;
-        add_line_id boolean;
     begin
         --backup line ops
         if (TG_OP = 'INSERT') or (TG_OP = 'UPDATE') then
@@ -242,24 +241,14 @@ create or replace function connector_after_ops() returns trigger as $connector_a
                     where ST_Within(line_point,geom)
                 );
                 if val_connector_id > 0 then
-                    if (TG_OP = 'UPDATE') then
-                        add_line_id = (
-                            select (road_connector.road_id != NEW.id) 
-                            from road_connector
-                            where road_connector.road_id = NEW.id
-                            and road_connector.connector_id = val_connector_id
+                    insert into road_connector (road_id,connector_id)
+                    select NEW.id, val_connector_id
+                    where not exists (
+                        select road_connector.id
+                        from road_connector
+                        where road_connector.road_id = NEW.id 
+                        and road_connector.connector_id = val_connector_id
                         );
-                    else
-                        add_line_id = true;
-                    end if;
-
-                    if add_line_id then                    
-                        insert into road_connector (road_id,connector_id)
-                        values(
-                            NEW.id,
-                            val_connector_id
-                        );
-                    end if;
                 else
                     insert into connector (width,geom)
                     values(
@@ -291,6 +280,4 @@ after insert or update or delete on road
    for each row execute procedure connector_after_ops()
 ;
 
-
---delete road trigger --
   
